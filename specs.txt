@@ -1,0 +1,12 @@
+digit dataset specs:
+
+total 2000 wav files
+4 speakers, 500 recordings per speaker
+50 recordings per digit
+
+sr = 8000
+mean length in sec = 0.402
+std length = 0.134
+max length = 2.283
+min length = 0.144
+total length = 804.339
