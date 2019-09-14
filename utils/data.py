@@ -5,11 +5,12 @@ import random
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import scipy
 import librosa
 import librosa.display
 import librosa.effects
 import torch
-import torchaudio
+#import torchaudio
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 
@@ -21,7 +22,7 @@ class conf:
     hop_length = int(sr * 0.0115) # step size half of frame
     fmin = 0.0
     fmax = 22050.0  # freq range of human speech
-    n_mels = 50
+    n_mels = 20
     n_fft = int(sr * 0.023)  # frames of 0.023 sec
     padmode = 'constant'
     samples = sr * duration
@@ -98,8 +99,11 @@ def show_mfcc(conf, mels, title='MFCC'):
     plt.show()
 
 def read_as_mfcc(conf, pathname, transform):
-    x, _ = torchaudio.load(pathname)
-    x = x[0, :].detach().numpy()
+    #x, _ = torchaudio.load(pathname)
+    #x = x[0, :].detach().numpy()
+    _, x = scipy.io.wavfile.read(pathname)
+    x = x.astype(np.float32)
+    #x = scipy.ndimage.median_filter(x, 3)
     x = pad_audio(conf, x)
     # apply data augmentations
     if transform:

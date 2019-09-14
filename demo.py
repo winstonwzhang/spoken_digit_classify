@@ -17,8 +17,10 @@ from os.path import join
 import sys
 import time
 import numpy as np
+import scipy
 import threading
 import pyaudio
+import librosa
 import pickle
 import joblib
 import torch
@@ -27,10 +29,12 @@ import utils
 from utils import model
 from utils import data
 
+import warnings
+warnings.filterwarnings("ignore")
 
 # HYPERPARAMETERS
 THRESH = 0.5  # threshold for novelty detection
-CHUNK = 4096  # chunk size of input audio stream
+CHUNK = 4092  # chunk size of input audio stream
 RATE = data.conf.sr  # sampling rate of input audio stream
 PRED_TIME = data.conf.duration  # audio time in sec used to predict
 
@@ -44,24 +48,34 @@ class PredModel(object):
     def __init__(self, state_dict_path):
         """Read in state_dict and initialize model."""
         self.mdl = model.BaseModel()
-        self.mdl.load_state_dict(torch.load(state_dict_path))
+        # if cpu-only
+        f_obj = torch.load(state_dict_path, map_location=torch.device('cpu'))
+        self.mdl.load_state_dict(f_obj)
         self.mdl.eval()
 
     def predict(self, test_wav):
         """Classify [PRED_TIME] seconds of audio. Returns predicted label."""
         # preprocess audio
         input_img = data.audio_to_mfcc(data.conf, test_wav)
-        img = torch.from_numpy(input_img)
-        img = img.unsqueeze_(0)  # add singleton dimension
         
-        # feed mfcc to model
-        output = self.mdl(img)
-        _, preds = torch.max(output, 1)
+        # no need for autograd
+        with torch.no_grad():
+            img = torch.from_numpy(input_img)
+            img = img.unsqueeze_(0).unsqueeze_(0)  # add singleton dimensions
+            
+            # feed mfcc to model
+            output = self.mdl(img)
+            # model output hasn't been softmaxed
+            output = torch.nn.functional.softmax(output, dim=1)
+            class_preds = output.detach().numpy()
         
         # does pred meet threshold?
+        pred = np.argmax(class_preds, axis=1)
+        prob = class_preds[:, pred]
+        #if prob > THRESH:
+        #    pred = ''
         
-        
-        return preds
+        return str(pred), str(prob)
 
 
 class RealTimeRecord(object):
@@ -81,7 +95,7 @@ class RealTimeRecord(object):
 
         # for tape recording (continuous "tape" of recent audio)
         self.tapeLength = PRED_TIME  # seconds
-        self.tape = np.empty(self.rate * self.tapeLength)
+        self.tape = np.empty(int(self.rate * self.tapeLength))
         self.tapePred = ''  # prediction for current audio in tape
         self.tapeProb = ''  # prediction probability
 
@@ -93,44 +107,48 @@ class RealTimeRecord(object):
         if startStreaming:
             self.stream_start()
 
-    def printBar(self, amt, total, fill='█'):
+    def printBar(self, peak_ratio, fill='='):
         """Prints a progress bar."""
-        bar = fill * int(30 * amt // total)
-        sys.stdout.write(("\r|%s|" % bar).ljust(70))
+        if peak_ratio > 1:
+            peak_ratio = 1
+        bar_length = 30
+        bar = fill * int(29 * peak_ratio)
+        spaces = ' ' * (bar_length - len(bar))
 
         if self.state == 'b':
-            sys.stdout.write("\n... Loading ...")
+            msg = "... Loading ..."
 
         if self.state == 'l':
-            sys.stdout.write(
-                "\nInput [p] to predict, and [q] to quit.")
+            msg = "Input [p] to predict, [s] to save audio clip, and [q] to quit."
 
         elif self.state == 'p':
-            sys.stdout.write(
-                "\nPrediction: %s. Prob: %s. Input [q] to cancel." % (
-                    self.tapePred, self.tapeProb))
+            msg = "Prediction: {0}. Prob: {1}. Input [q] to cancel.".format(
+                self.tapePred, self.tapeProb)
+        
+        elif self.state == 's':
+            msg = "Last {0} seconds saved to clips/".format(PRED_TIME)
+        
+        sys.stdout.write(("\r|{0}|{1}".format(bar + spaces, msg)).ljust(70))
 
     # // LOWEST LEVEL AUDIO ACCESS
     # pure access to microphone and stream operations
 
     def stream_read(self):
         """return values for a single chunk"""
-        data = np.frombuffer(self.stream.read(self.chunk), dtype=np.int16)
-        # data = data[:self.chunk]
-        data = data.astype(np.float32)
-        # convert to monochannel audio
-        data = np.vstack((data[::2] / 2, data[1::2] / 2)).sum(axis=0)
-        data = data.astype(np.int16)
-        # self.player.write(data, self.chunk)
-        return data
+        dat = np.fromstring(self.stream.read(self.chunk), dtype=np.float32)
+        #import pdb; pdb.set_trace()
+        dat = np.vstack((dat[::2] / 2, dat[1::2] / 2)).sum(axis=0)
+        dat = scipy.ndimage.median_filter(dat, 3)  # filter noise
+        self.player.write(dat, self.chunk)
+        return dat
 
     def stream_start(self):
         """connect to the audio device and start a stream"""
         print(" -- stream started")
-        self.stream = self.p.open(format=pyaudio.paInt16, channels=2,
+        self.stream = self.p.open(format=pyaudio.paFloat32, channels=2,
                                   rate=self.rate, input=True,
                                   frames_per_buffer=self.chunk)
-        self.player = self.p.open(format=pyaudio.paInt16, channels=1,
+        self.player = self.p.open(format=pyaudio.paFloat32, channels=1,
                                   rate=self.rate, output=True,
                                   frames_per_buffer=self.chunk)
 
@@ -172,7 +190,7 @@ class RealTimeRecord(object):
                 self.tape_add()
                 # for length of cmd line bar
                 peak = int(np.average(np.abs(self.tape)))
-                self.printBar(peak, self.rate)
+                self.printBar(peak / 1000)
                 time.sleep(0.25)
         except Exception as e:
             print(e)
@@ -193,7 +211,7 @@ class RealTimeRecord(object):
         voicebar = threading.Thread(target=self.tape_forever, args=[])
         voicebar.start()
 
-        time.sleep(5)  # wait for tape to fill
+        time.sleep(3)  # wait for tape to fill
         self.state = 'l'  # start listening to input
 
         while not self.shutdown:
@@ -204,6 +222,14 @@ class RealTimeRecord(object):
                 self.state = 'p'
                 p_thread = threading.Thread(target=self.predict, args=[])
                 p_thread.start()
+            
+            elif choice == 's' and self.state == 'l':
+                # save currently stored clip
+                self.state = 's'
+                scipy.io.wavfile.write(
+                    'clips/' + str(int(time.time())) + '.wav', self.rate, self.tape)
+                time.sleep(3)
+                self.state = 'l'
 
             elif choice == 'q':
                 # quit or cancel action
@@ -238,6 +264,6 @@ if __name__ == "__main__":
     RTR_obj = RealTimeRecord(mdl=mdl_obj)
     RTR_obj.listen()
 
-    TISR_obj.close()
+    RTR_obj.close()
 
     print("DONE")
