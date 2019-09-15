@@ -57,23 +57,12 @@ class PredModel(object):
         """Classify [PRED_TIME] seconds of audio. Returns predicted label."""
         # preprocess audio
         input_img = data.audio_to_mfcc(data.conf, test_wav)
+        input_img = data.norm_mfcc(input_img)
         
-        # no need for autograd
-        with torch.no_grad():
-            img = torch.from_numpy(input_img)
-            img = img.unsqueeze_(0).unsqueeze_(0)  # add singleton dimensions
-            
-            # feed mfcc to model
-            output = self.mdl(img)
-            # model output hasn't been softmaxed
-            output = torch.nn.functional.softmax(output, dim=1)
-            class_preds = output.detach().numpy()
-        
+        class_preds = model.model_predict(input_img, self.mdl)
         # does pred meet threshold?
         pred = np.argmax(class_preds, axis=1)
         prob = class_preds[:, pred]
-        #if prob > THRESH:
-        #    pred = ''
         
         return str(pred), str(prob)
 
@@ -172,8 +161,9 @@ class RealTimeRecord(object):
 
     def tape_add(self):
         """add a single chunk to the tape."""
+        new_chunk = self.stream_read()
         self.tape[:-self.chunk] = self.tape[self.chunk:]
-        self.tape[-self.chunk:] = self.stream_read()
+        self.tape[-self.chunk:] = new_chunk
 
     def tape_flush(self):
         """completely fill tape with new data."""
@@ -190,6 +180,7 @@ class RealTimeRecord(object):
                 self.tape_add()
                 # for length of cmd line bar
                 peak = int(np.average(np.abs(self.tape)))
+                #print(self.tape)
                 self.printBar(peak / 1000)
                 time.sleep(0.25)
         except Exception as e:

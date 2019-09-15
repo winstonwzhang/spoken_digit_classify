@@ -4,28 +4,31 @@ import time
 import random
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import scipy
+import matplotlib.pyplot as plt
 import librosa
 import librosa.display
 import librosa.effects
 import torch
-#import torchaudio
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 
 
-# default configuration
+# default data hyperparameters
 class conf:
-    sr = 8000
-    duration = 2.3 # max length
-    hop_length = int(sr * 0.0115) # step size half of frame
+    sr = 8000  # sampling rate
+    duration = 2.3  # how long input samples to our model should be
+    hop_length = int(sr * 0.0115)  # step size half of frame
     fmin = 0.0
     fmax = 22050.0  # freq range of human speech
-    n_mels = 20
+    n_mels = 25  # number of mfcc coefficients
     n_fft = int(sr * 0.023)  # frames of 0.023 sec
     padmode = 'constant'
     samples = sr * duration
+    aug_probs = {'noise': 0.7,
+                 'pitch': 0.3,
+                 'speed': 0.7,
+                 'shift': 0.8}  # prob of augment being applied
 
 
 class Transform:
@@ -36,18 +39,19 @@ class Transform:
     
     def run_transforms(self):
         x = self.wav
-        if random.uniform(0, 1) > 0.3:
-            x = self.add_noise(x)
-        if random.uniform(0, 1) > 0.7:
+        if random.uniform(0, 1) < self.conf.aug_probs['pitch']:
             x = self.pitch_shift(x)
-        if random.uniform(0, 1) > 0.5:
+        if random.uniform(0, 1) < self.conf.aug_probs['speed']:
             x = self.speed_change(x)
         return x
     
     def add_noise(self, wav):
-        noise = np.random.normal(size=len(wav))
-        factor = 0.005 * random.uniform(0, 1) * max(wav)
-        return wav + factor * noise
+        if random.uniform(0, 1) < self.conf.aug_probs['noise']:
+            noise = np.random.normal(size=len(wav))
+            factor = 0.005 * random.uniform(0, 1) * max(wav)
+            return wav + factor * noise
+        else:
+            return wav
     
     def pitch_shift(self, wav):
         pitch_pm = 2
@@ -64,23 +68,25 @@ class Transform:
         return wav
 
 
-def pad_audio(conf, audio):
-    # make it unified length to conf.samples
+def pad_audio(conf, audio, transform):
+    # pad or cut audio to same length as conf.samples
     if len(audio) > conf.samples:
         audio = audio[0:0+conf.samples]
     elif len(audio) < conf.samples: # pad blank
         padding = conf.samples - len(audio)    # add padding at both ends
-        offset = math.ceil(padding // 2)
-        padwidth = (offset, math.ceil(conf.samples - len(audio) - offset))
+        if transform and random.uniform(0, 1) < conf.aug_probs['shift']:
+            offset = random.randint(0, padding)
+        else:
+            offset = math.ceil(padding // 2)
+        # random shift of audio (speech not always in center of spectrogram)
+        padwidth = (offset, math.ceil(padding - offset))
         audio = np.pad(audio, padwidth, conf.padmode)
     return audio
   
 def audio_to_mfcc(conf, audio):
-    audio = pad_audio(conf, audio)
-
     spectrogram = librosa.feature.mfcc(audio, 
                                        sr=conf.sr,
-                                       n_mels=conf.n_mels,
+                                       n_mfcc=conf.n_mels,
                                        hop_length=conf.hop_length,
                                        n_fft=conf.n_fft,
                                        fmin=conf.fmin,
@@ -99,19 +105,34 @@ def show_mfcc(conf, mels, title='MFCC'):
     plt.show()
 
 def read_as_mfcc(conf, pathname, transform):
-    #x, _ = torchaudio.load(pathname)
-    #x = x[0, :].detach().numpy()
+    # librosa slow to load for some reason
     _, x = scipy.io.wavfile.read(pathname)
-    x = x.astype(np.float32)
-    #x = scipy.ndimage.median_filter(x, 3)
-    x = pad_audio(conf, x)
-    # apply data augmentations
+    x = np.float32(x)
+    # apply audio data augmentations (pitch, speed)
     if transform:
         tr = Transform(conf, x)
         x = tr.run_transforms()
-    mels = audio_to_mfcc(conf, x)
-    # show_mfcc(conf, mels)
-    return mels
+    # padding for uniform input length
+    x = pad_audio(conf, x, transform)
+    # add noise to simulate realistic conditions
+    if transform:
+        x = tr.add_noise(x)
+    # get mfccs
+    mfcc = audio_to_mfcc(conf, x)
+    # show_mfcc(conf, mfcc)
+    return mfcc
+
+def norm_mfcc(mfcc_data):
+    # normalize mfcc coefficients within each sample
+    mfcc_mean = np.mean(mfcc_data, axis=1)
+    mfcc_std = np.std(mfcc_data, axis=1)
+    
+    # broadcast across all time frames
+    mfcc_mean = mfcc_mean[:, np.newaxis]
+    mfcc_std = mfcc_std[:, np.newaxis]
+    mfcc_data = (mfcc_data - mfcc_mean) / mfcc_std
+    
+    return mfcc_data
 
 
 class Digit_Dataset(Dataset):
@@ -119,6 +140,8 @@ class Digit_Dataset(Dataset):
     def __init__(self, wav_dir, transform=True):
         self.wav_dir = wav_dir
         self.data = os.listdir(wav_dir)
+        # keep only .wav files
+        self.data = [s for s in self.data if '.wav' in s]
         self.labels = [int(s[0]) for s in self.data]
         self.transform = transform
           
@@ -132,7 +155,9 @@ class Digit_Dataset(Dataset):
 
             mfcc_data = read_as_mfcc(
                 conf, self.wav_dir + wav_name, self.transform)
-          
+            
+            mfcc_data = norm_mfcc(mfcc_data)
+            
             img = torch.from_numpy(mfcc_data)
             img = img.unsqueeze_(0) # add singleton dimension
 
