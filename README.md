@@ -3,6 +3,8 @@
 #### *Train CNN in Pytorch to classify spoken numbers (0-9)*
 ---
 
+Google Colab notebook where you can run the code with a GPU: https://colab.research.google.com/notebook#fileId=1JD685MRKYJyahfSdU8pirw5oqO4hxAiw&offline=true&sandboxMode=true
+
 ## Dataset
 
 Used dataset: <a href='https://github.com/Jakobovski/free-spoken-digit-dataset'>free-spoken-digit-dataset</a>
