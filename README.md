@@ -71,6 +71,15 @@ Model Layers:
 	<img src='images/pytorch_model_forward.png' alt='Model'> 
 </p>
 
+I decided on three convolutional layers and three fully connected layers, with batch norm and max pooling between conv layers and dropout between the linear layers.
+
+The input images are small in dimension, so I used 3x3 convolutions to capture the small variations in MFCC channels.
+
+I used 1x2 max pooling since our y-axis dimension is only 25 - too much pooling, and a lot of information would be lost!
+
+I also used 1x1 convolutions to reduce the number of channels between successive layers. This helps reduce the number of parameters that needs to be learned, and also prevents the fully connected layers from having hundreds of thousands of parameters! It can help make the network light-weight and easier to train.
+
+This technique has been widely used in recent models for managing the large number of parameters that will result from convolution layers.
 
 ## Training and Validation
 
